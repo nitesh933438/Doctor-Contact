@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isSignedIn() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    function existing() {
+      return resource.data;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- Entity Validations ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'email', 'role']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 100 &&
+             data.role in ['patient', 'doctor', 'admin'];
+    }
+
+    function isValidDoctor(data) {
+      return data.keys().hasAll(['name', 'specialty', 'fee']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.specialty is string && data.specialty.size() > 0 && data.specialty.size() <= 100 &&
+             data.fee is number && data.fee >= 0;
+    }
+
+    function isValidAppointment(data) {
+      return data.keys().hasAll(['doctorId', 'patientId', 'date', 'time', 'status']) &&
+             data.doctorId is string && isValidId(data.doctorId) &&
+             data.patientId is string && isValidId(data.patientId) &&
+             data.date is string && data.date.size() > 0 &&
+             data.time is string && data.time.size() > 0 &&
+             data.status in ['pending', 'confirmed', 'cancelled'];
+    }
+
+    function isValidPrescription(data) {
+      return data.keys().hasAll(['appointmentId', 'diagnosis', 'medicines']) &&
+             data.appointmentId is string &&
+             data.diagnosis is string && data.diagnosis.size() > 0 &&
+             data.medicines is list;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().role == 'patient';
+      allow update: if (isOwner(userId) && isValidUser(incoming()) && incoming().role == existing().role) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /doctors/{doctorId} {
+      allow get, list: if true; // Publicly readable
+      
+      allow create: if isAdmin() && isValidDoctor(incoming()) && isValidId(doctorId);
+      allow update: if isAdmin() && isValidDoctor(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /appointments/{appointmentId} {
+      allow get: if isSignedIn() && (isOwner(existing().patientId) || isAdmin());
+      allow list: if isSignedIn(); 
+      
+      allow create: if isSignedIn() && 
+                    isValidAppointment(incoming()) && 
+                    isOwner(incoming().patientId);
+                    
+      allow update: if isAdmin() || (
+        isOwner(existing().patientId) && 
+        isValidAppointment(incoming()) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status']) &&
+        incoming().status == 'cancelled'
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    match /prescriptions/{prescriptionId} {
+      allow get: if isSignedIn() && (isOwner(existing().patientId) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.patientId == request.auth.uid || isAdmin());
+      
+      allow create: if isAdmin() && isValidPrescription(incoming()) && isValidId(prescriptionId);
+      allow update: if isAdmin() && isValidPrescription(incoming());
+      allow delete: if isAdmin();
+    }
+  }
+}
